@@ -10,6 +10,7 @@ from rich.console import Console
 from rich.layout import Layout
 from rich.live import Live
 from rich.panel import Panel
+from rich.progress import BarColumn, Progress, TextColumn
 from rich.table import Table
 from rich.text import Text
 
@@ -19,12 +20,14 @@ from .config import get_config
 console = Console()
 
 
-def build_header(dry_run: bool, scan_count: int) -> Panel:
+def build_header(dry_run: bool, scan_count: int, sentiment_enabled: bool) -> Panel:
     mode = "[bold yellow]DRY RUN[/]" if dry_run else "[bold red]LIVE TRADING[/]"
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    news = "[green]NEWS ON[/]" if sentiment_enabled else "[dim]NEWS OFF[/]"
     return Panel(
         Text.from_markup(
-            f"  Claude + Polymarket Bot  |  {mode}  |  {ts}  |  Scans: [cyan]{scan_count}[/]"
+            f"  Claude + Polymarket Bot  |  {mode}  |  {ts}  "
+            f"|  Scans: [cyan]{scan_count}[/]  |  {news}"
         ),
         style="bold blue",
         box=box.HEAVY,
@@ -69,7 +72,20 @@ def build_stats_panel(data: dict) -> Panel:
     daily_pnl = data.get("daily_pnl", 0.0)
     unrealized = data.get("unrealized_pnl", 0.0)
     total_pnl = daily_pnl + unrealized
+    daily_target = data.get("daily_target", 0.0)
     pnl_style = "green" if total_pnl >= 0 else "red"
+
+    # Progress bar toward daily target
+    target_line = ""
+    if daily_target > 0:
+        pct = min(daily_pnl / daily_target, 1.0)
+        bar_filled = int(pct * 20)
+        bar = "█" * bar_filled + "░" * (20 - bar_filled)
+        target_style = "green" if pct >= 1.0 else "yellow"
+        target_line = (
+            f"\nDaily target:      [{target_style}]{bar}[/] "
+            f"[{target_style}]${daily_pnl:.0f}/${daily_target:.0f}[/]"
+        )
 
     lines = [
         f"Decisions made:    [cyan]{stats.get('decisions', 0)}[/]",
@@ -83,6 +99,9 @@ def build_stats_panel(data: dict) -> Panel:
         f"Unrealized P&L:    [{pnl_style}]${unrealized:+.2f}[/]",
         f"Total P&L:         [{pnl_style}]${total_pnl:+.2f}[/]",
     ]
+    if target_line:
+        lines.append(target_line)
+
     return Panel("\n".join(lines), title="Session Stats", border_style="green")
 
 
@@ -90,7 +109,7 @@ def render_layout(bot: TradingBot) -> Layout:
     data = bot.get_dashboard_data()
     layout = Layout()
     layout.split_column(
-        Layout(build_header(data["dry_run"], data["scan_count"]), size=3),
+        Layout(build_header(data["dry_run"], data["scan_count"], data.get("sentiment_enabled", False)), size=3),
         Layout(build_positions_table(data["positions"]), ratio=3),
         Layout(build_stats_panel(data), ratio=2),
     )
@@ -111,7 +130,7 @@ def cli() -> None:
     type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"]),
 )
 def run(dry_run: bool | None, once: bool, log_level: str | None) -> None:
-    """Start the trading bot."""
+    """Start the trading bot (24h continuous with live dashboard)."""
     logging.basicConfig(
         level=getattr(logging, log_level or "INFO"),
         format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
@@ -123,6 +142,12 @@ def run(dry_run: bool | None, once: bool, log_level: str | None) -> None:
 
     mode_label = "DRY RUN" if config.DRY_RUN else "LIVE TRADING"
     console.print(f"\n[bold blue]Claude + Polymarket Bot[/] — [bold yellow]{mode_label}[/]\n")
+
+    if config.DAILY_PROFIT_TARGET_USDC > 0:
+        console.print(
+            f"Daily profit target: [green]${config.DAILY_PROFIT_TARGET_USDC:,.2f}[/] "
+            f"(resets midnight UTC)\n"
+        )
 
     bot = TradingBot(config)
 
@@ -152,7 +177,7 @@ def run(dry_run: bool | None, once: bool, log_level: str | None) -> None:
 
 @cli.command()
 def status() -> None:
-    """Show current positions from persisted state."""
+    """Show current positions and P&L from persisted state."""
     p = Path("logs/positions.json")
     if not p.exists():
         console.print("[yellow]No positions file found. Has the bot run yet?[/]")
@@ -170,14 +195,25 @@ def status() -> None:
         table.add_column("Action")
         table.add_column("Size $", justify="right")
         table.add_column("Entry", justify="right")
+        table.add_column("Unrealized P&L", justify="right")
         for pos in positions.values():
+            pnl = pos.get("unrealized_pnl", 0.0)
             table.add_row(
                 pos.get("question", "")[:60],
                 pos.get("action", ""),
                 f"${pos.get('size_usdc', 0):.2f}",
                 f"{pos.get('entry_price', 0):.3f}",
+                Text(f"${pnl:+.2f}", style="green" if pnl >= 0 else "red"),
             )
         console.print(table)
+
+
+@cli.command()
+def check() -> None:
+    """Run pre-flight connection checks (Anthropic, Polymarket, Polygon, News)."""
+    from .setup_check import async_main
+    import sys
+    sys.exit(asyncio.run(async_main()))
 
 
 def main() -> None:

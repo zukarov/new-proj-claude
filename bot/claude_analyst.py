@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 from .config import TradingConfig
 from .polymarket_client import MarketSummary, OrderBookSnapshot
 from .risk_manager import TradingAction
+from .sentiment_client import MarketSentiment
 
 logger = logging.getLogger(__name__)
 
@@ -147,15 +148,30 @@ class ClaudeAnalyst:
         market: MarketSummary,
         order_book: OrderBookSnapshot,
         portfolio_context: dict,
+        sentiment: Optional[MarketSentiment] = None,
     ) -> str:
+        sentiment_section = ""
+        if sentiment and sentiment.has_news:
+            sentiment_section = f"""
+## Recent News & Social Sentiment
+Search query used: "{sentiment.query}"
+
+{sentiment.as_text()}
+
+Use these headlines to calibrate your probability estimate. Ask yourself:
+- Do the headlines confirm or contradict the market consensus?
+- Is the news already priced in, or does it represent new information?
+- What is the direction of recent sentiment (positive/negative for YES)?
+"""
+
         return f"""## Market to Analyze
 
 **Question:** {market.question}
 **Market closes:** {market.end_date_iso}
 **24h Volume:** ${market.volume_24h:,.0f} USDC
 **Liquidity:** ${market.liquidity:,.0f} USDC
-
-## Current Prices
+{sentiment_section}
+## Order Book
 - YES best ask: {order_book.yes_best_ask}
 - YES best bid: {order_book.yes_best_bid}
 - Midpoint (implied probability of YES): {order_book.midpoint}
@@ -174,12 +190,14 @@ Analyze this market and call submit_trading_decision with your verdict.
         market: MarketSummary,
         order_book: OrderBookSnapshot,
         portfolio_context: dict,
+        sentiment: Optional[MarketSentiment] = None,
     ) -> TradingDecision:
         """
         Deep analysis with adaptive thinking + tool use.
+        Optionally includes recent news sentiment in the prompt.
         Returns a fully typed TradingDecision.
         """
-        user_content = self._build_market_context(market, order_book, portfolio_context)
+        user_content = self._build_market_context(market, order_book, portfolio_context, sentiment)
 
         def _call_claude() -> TradingDecision:
             response = self._client.messages.create(

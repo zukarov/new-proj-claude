@@ -39,6 +39,18 @@ class TradingConfig(BaseSettings):
     # Simulated balance used only in DRY_RUN mode (no real money)
     DRY_RUN_BALANCE_USDC: float = 1000.0
 
+    # --- Daily Profit Target ---
+    # Bot stops opening NEW positions once realized daily P&L hits this amount.
+    # Stop-loss monitoring on existing positions continues regardless.
+    # Resets to zero automatically at midnight UTC.
+    # Set to 0.0 to disable (run indefinitely).
+    DAILY_PROFIT_TARGET_USDC: float = 300.0
+
+    # --- Sentiment ---
+    # If True, the bot fetches recent news headlines via Google News RSS and
+    # includes them as context in Claude's market analysis prompt.
+    ENABLE_SENTIMENT: bool = True
+
     # --- Logging ---
     LOG_LEVEL: str = "INFO"
     LOG_FILE: str = "logs/trading_bot.jsonl"

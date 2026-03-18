@@ -14,6 +14,7 @@ from .claude_analyst import ClaudeAnalyst, TradingDecision
 from .config import TradingConfig, get_config
 from .polymarket_client import PolymarketClient, TradeResult
 from .risk_manager import PortfolioState, RiskManager, TradingAction
+from .sentiment_client import SentimentClient
 
 logger = structlog.get_logger(__name__)
 
@@ -115,6 +116,7 @@ class TradingBot:
         self.analyst = ClaudeAnalyst(self.config)
         self.risk = RiskManager(self.config)
         self.tracker = PositionTracker()
+        self.sentiment = SentimentClient()
         self.scheduler = AsyncIOScheduler()
         self._running = False
         self._scan_count = 0
@@ -209,6 +211,16 @@ class TradingBot:
             self._stats["circuit_breaker_trips"] += 1
             return cycle_stats
 
+        # Daily profit target: stop opening new positions when reached
+        target = self.config.DAILY_PROFIT_TARGET_USDC
+        if target > 0 and self.tracker.daily_pnl >= target:
+            logger.info(
+                "Daily profit target reached — no new positions this cycle",
+                target=target,
+                daily_pnl=self.tracker.daily_pnl,
+            )
+            return cycle_stats
+
         for market in markets:
             try:
                 yes_token = market.tokens[0] if market.tokens else None
@@ -230,9 +242,14 @@ class TradingBot:
                     "daily_pnl": portfolio_state.daily_pnl,
                 }
 
-                # Claude deep analysis
+                # Fetch news sentiment for this market (cached 15 min)
+                sentiment = None
+                if self.config.ENABLE_SENTIMENT:
+                    sentiment = await self.sentiment.get_news_for_market(market.question)
+
+                # Claude deep analysis (includes sentiment context when available)
                 decision: TradingDecision = await self.analyst.analyze_market(
-                    market, book, portfolio_context
+                    market, book, portfolio_context, sentiment
                 )
                 cycle_stats["analyzed"] += 1
                 self._stats["decisions"] += 1
@@ -340,6 +357,14 @@ class TradingBot:
             id="market_scan",
             max_instances=1,  # Prevent overlapping scans
         )
+        # Reset daily P&L at midnight UTC so the target renews each day
+        self.scheduler.add_job(
+            self._reset_daily_pnl,
+            trigger="cron",
+            hour=0,
+            minute=0,
+            id="daily_reset",
+        )
         self.scheduler.start()
         logger.info(
             "Bot started",
@@ -353,6 +378,13 @@ class TradingBot:
         # Keep alive
         while self._running:
             await asyncio.sleep(1)
+
+    async def _reset_daily_pnl(self) -> None:
+        """Called at midnight UTC: reset daily P&L counter for a fresh day."""
+        prev = self.tracker.daily_pnl
+        self.tracker.daily_pnl = 0.0
+        self.tracker._save_to_disk()
+        logger.info("Daily P&L reset at midnight", previous_daily_pnl=prev)
 
     async def stop(self) -> None:
         self._running = False
@@ -368,4 +400,6 @@ class TradingBot:
             "scan_count": self._scan_count,
             "stats": dict(self._stats),
             "dry_run": self.config.DRY_RUN,
+            "daily_target": self.config.DAILY_PROFIT_TARGET_USDC,
+            "sentiment_enabled": self.config.ENABLE_SENTIMENT,
         }
