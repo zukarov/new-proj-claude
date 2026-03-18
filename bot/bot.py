@@ -200,7 +200,7 @@ class TradingBot:
         markets = markets[: self.config.MAX_MARKETS_PER_SCAN]
 
         # Step 4: Deep analysis + execution per market
-        available_usdc = 1000.0  # Default; real use: fetch on-chain USDC balance
+        available_usdc = await self.polymarket.get_usdc_balance()
         portfolio_state = self._build_portfolio_state(available_usdc)
 
         # Circuit breaker check before processing any markets

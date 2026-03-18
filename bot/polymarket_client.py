@@ -3,10 +3,17 @@ import logging
 from decimal import Decimal
 from typing import Optional
 
+import aiohttp
 from pydantic import BaseModel
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from .config import TradingConfig
+
+# USDC.e (bridged USDC) on Polygon — the collateral token used by Polymarket
+_USDC_CONTRACT = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+_USDC_DECIMALS = 6
+# ERC20 balanceOf(address) selector
+_BALANCE_OF_SELECTOR = "0x70a08231"
 
 logger = logging.getLogger(__name__)
 
@@ -175,6 +182,49 @@ class PolymarketClient:
         return await asyncio.to_thread(
             lambda: self._client.get_orders().get("data", [])
         )
+
+    async def get_usdc_balance(self) -> float:
+        """
+        Return the USDC.e balance (in dollars) of the funder wallet.
+
+        In DRY_RUN mode, returns the configured DRY_RUN_BALANCE_USDC value.
+        In live mode, queries the Polygon RPC directly via eth_call on the
+        USDC.e contract — no extra dependency needed beyond aiohttp.
+        """
+        if self._config.DRY_RUN:
+            return self._config.DRY_RUN_BALANCE_USDC
+
+        # Encode balanceOf(address) call data
+        # Pad the wallet address to 32 bytes (strip 0x prefix, left-pad with zeros)
+        wallet = self._config.POLYMARKET_FUNDER.lower().removeprefix("0x")
+        call_data = _BALANCE_OF_SELECTOR + wallet.zfill(64)
+
+        payload = {
+            "jsonrpc": "2.0",
+            "method": "eth_call",
+            "params": [
+                {"to": _USDC_CONTRACT, "data": call_data},
+                "latest",
+            ],
+            "id": 1,
+        }
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    self._config.POLYGON_RPC_URL,
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    data = await resp.json()
+            raw_hex = data.get("result", "0x0")
+            raw_int = int(raw_hex, 16)
+            balance = raw_int / (10 ** _USDC_DECIMALS)
+            logger.info("USDC balance fetched", balance_usdc=balance, wallet=self._config.POLYMARKET_FUNDER)
+            return balance
+        except Exception as exc:
+            logger.error("Failed to fetch USDC balance", error=str(exc))
+            return 0.0
 
     # --- Mock data for dry-run mode ---
 

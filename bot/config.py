@@ -1,18 +1,23 @@
 from decimal import Decimal
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 
 class TradingConfig(BaseSettings):
     # --- Polymarket / Ethereum ---
-    POLYGON_PRIVATE_KEY: str = "0x0000000000000000000000000000000000000000000000000000000000000001"
-    POLYMARKET_FUNDER: str = "0x0000000000000000000000000000000000000000"
+    # Required for live trading. Must be set in .env when DRY_RUN=false.
+    POLYGON_PRIVATE_KEY: str = ""
+    POLYMARKET_FUNDER: str = ""  # Your wallet address (holds USDC on Polygon)
     CLOB_HOST: str = "https://clob.polymarket.com"
     CHAIN_ID: int = 137
-    SIGNATURE_TYPE: int = 1  # 1 = email/Magic wallet
+    SIGNATURE_TYPE: int = 1  # 1 = email/Magic wallet; 0 = EOA
+
+    # Polygon RPC endpoint for querying on-chain USDC balance
+    POLYGON_RPC_URL: str = "https://polygon-rpc.com"
 
     # --- Anthropic ---
+    # Required always. Get yours at https://console.anthropic.com/
     ANTHROPIC_API_KEY: str = ""
     CLAUDE_MODEL: str = "claude-sonnet-4-6"
 
@@ -26,10 +31,13 @@ class TradingConfig(BaseSettings):
     MAX_DRAWDOWN_PCT: Decimal = Decimal("0.15")         # Circuit breaker
 
     # --- Bot Behavior ---
-    DRY_RUN: bool = True             # Default SAFE: no real orders
-    SCAN_INTERVAL_SECONDS: int = 300  # How often to fetch markets
-    MAX_MARKETS_PER_SCAN: int = 20   # Claude analyses per cycle (cost control)
+    DRY_RUN: bool = True             # Default SAFE: no real orders sent
+    SCAN_INTERVAL_SECONDS: int = 300  # How often to scan markets (seconds)
+    MAX_MARKETS_PER_SCAN: int = 20   # Claude analyses per cycle (controls AI cost)
     MIN_MARKET_LIQUIDITY_USDC: float = 1000.0
+
+    # Simulated balance used only in DRY_RUN mode (no real money)
+    DRY_RUN_BALANCE_USDC: float = 1000.0
 
     # --- Logging ---
     LOG_LEVEL: str = "INFO"
@@ -50,6 +58,34 @@ class TradingConfig(BaseSettings):
         if not (Decimal("0") < v <= Decimal("1")):
             raise ValueError("KELLY_FRACTION must be between 0 and 1")
         return v
+
+    @model_validator(mode="after")
+    def validate_live_credentials(self) -> "TradingConfig":
+        """
+        Fail fast if live mode is enabled but credentials are missing or placeholder.
+        In DRY_RUN mode, missing credentials are fine — they are never used.
+        """
+        if not self.ANTHROPIC_API_KEY:
+            raise ValueError(
+                "ANTHROPIC_API_KEY is not set. "
+                "Add it to your .env file: ANTHROPIC_API_KEY=sk-ant-..."
+            )
+
+        if not self.DRY_RUN:
+            # Private key check
+            if not self.POLYGON_PRIVATE_KEY or self.POLYGON_PRIVATE_KEY in ("", "0x"):
+                raise ValueError(
+                    "POLYGON_PRIVATE_KEY is not set. "
+                    "Required for live trading. Add it to your .env file."
+                )
+            # Wallet address check
+            if not self.POLYMARKET_FUNDER or len(self.POLYMARKET_FUNDER) != 42:
+                raise ValueError(
+                    "POLYMARKET_FUNDER is not a valid Ethereum address (42 chars, 0x-prefixed). "
+                    "Set it in your .env file to your Polygon wallet address."
+                )
+
+        return self
 
 
 _config: TradingConfig | None = None
